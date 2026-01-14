@@ -10,33 +10,49 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from mistralai import Mistral
-from mistralai import models  # SDKError
-
+from mistralai import models
 
 # =========================
-# API KEY (theo yêu cầu: để thẳng trong code)
-# Khuyến nghị: đổi sang env MISTRAL_API_KEY sau khi chạy ổn.
+# API KEY
 # =========================
 MISTRAL_API_KEY = "Ucg2pUYmpXOQyVmicgE9ySKF2hqYcFFT"
 
 # OCR model
-OCR_MODEL = "mistral-ocr-latest"  # Mistral Document AI OCR :contentReference[oaicite:2]{index=2}
+OCR_MODEL = "mistral-ocr-latest"
 
-# Chat model để trích xuất bảng
-CHAT_MODEL_DEFAULT = "mistral-small-latest"
+# Chat model (Khuyên dùng mistral-large-latest hoặc mistral-small-latest cho task phức tạp này)
+CHAT_MODEL_DEFAULT = "mistral-large-latest"
 
+# =========================
+# CẤU HÌNH BẢNG & TỪ KHÓA NHẬN DIỆN (UPDATED)
+# =========================
 TABLES = {
     "balance_sheet": {
-        "title": "Báo cáo cân đối kế toán hợp nhất (Bảng cân đối kế toán hợp nhất)",
-        "filename": "bao_cao_can_doi_ke_toan_hop_nhat.csv",
+        "title": "Bảng Cân đối kế toán (Balance Sheet)",
+        "filename": "bang_can_doi_ke_toan.csv",
+        "keywords": (
+            "Tìm các dòng: TÀI SẢN, TÀI SẢN NGẮN HẠN, TÀI SẢN DÀI HẠN, "
+            "TỔNG CỘNG TÀI SẢN, NỢ PHẢI TRẢ, VỐN CHỦ SỞ HỮU, TỔNG CỘNG NGUỒN VỐN. "
+            "Cột số liệu thường là Số cuối kỳ và Số đầu năm."
+        )
     },
     "income_statement": {
-        "title": "Báo cáo kết quả hoạt động kinh doanh",
-        "filename": "bao_cao_ket_qua_hoat_dong_kinh_doanh.csv",
+        "title": "Báo cáo Kết quả hoạt động kinh doanh (Income Statement)",
+        "filename": "ket_qua_kinh_doanh.csv",
+        "keywords": (
+            "Tìm các dòng: Doanh thu bán hàng và cung cấp dịch vụ, Doanh thu thuần, "
+            "Giá vốn hàng bán, Lợi nhuận gộp, Lợi nhuận thuần, Tổng lợi nhuận kế toán trước thuế, "
+            "Lợi nhuận sau thuế thu nhập doanh nghiệp (Mã số 60)."
+        )
     },
     "cashflow": {
-        "title": "Báo cáo lưu chuyển tiền tệ",
-        "filename": "bao_cao_luu_chuyen_tien_te.csv",
+        "title": "Báo cáo Lưu chuyển tiền tệ (Cash Flow Statement)",
+        "filename": "luu_chuyen_tien_te.csv",
+        "keywords": (
+            "Tìm các dòng: Lưu chuyển tiền từ hoạt động kinh doanh, "
+            "Lưu chuyển tiền từ hoạt động đầu tư, Lưu chuyển tiền từ hoạt động tài chính, "
+            "Lưu chuyển tiền thuần trong kỳ, Tiền và tương đương tiền cuối kỳ."
+        )
     },
 }
 
@@ -66,48 +82,46 @@ def parse_model_json(s: str) -> dict:
     try:
         return json.loads(raw)
     except Exception:
-        raw2 = re.sub(r",\s*([}\]])", r"\1", raw)  # trailing commas
+        # Cố gắng sửa lỗi trailing commas phổ biến trong JSON do AI sinh ra
+        raw2 = re.sub(r",\s*([}\]])", r"\1", raw)
         return json.loads(raw2)
 
 
 def json_to_dataframe(table_json: Dict) -> pd.DataFrame:
     cols = table_json.get("columns", [])
     rows = table_json.get("rows", [])
+    
     if not isinstance(cols, list) or not cols:
-        raise ValueError("JSON thiếu 'columns' hoặc columns không hợp lệ.")
+        # Fallback nếu AI không trả về columns đúng
+        cols = ["Chỉ tiêu", "Mã số", "Thuyết minh", "Kỳ này", "Kỳ trước"]
+        
     if not isinstance(rows, list):
         raise ValueError("JSON thiếu 'rows' hoặc rows không hợp lệ.")
 
     fixed_rows = []
     for r in rows:
         if isinstance(r, dict):
-            fixed_rows.append({c: (r.get(c, "") if r.get(c, "") is not None else "") for c in cols})
+            # Đảm bảo thứ tự cột đúng
+            row_data = {c: (r.get(c, "") if r.get(c, "") is not None else "") for c in cols}
+            fixed_rows.append(row_data)
 
     return pd.DataFrame(fixed_rows, columns=cols)
 
 
 # =========================
-# 1) Mistral OCR: upload PDF -> /v1/ocr -> text
+# 1) Mistral OCR
 # =========================
 def mistral_ocr_pdf_to_text(client: Mistral, api_key: str, pdf_path: str, log_cb=None) -> str:
-    """
-    Upload file -> get file_id -> call /v1/ocr -> concat pages markdown.
-    - Upload endpoint supports purpose="ocr". :contentReference[oaicite:3]{index=3}
-    - OCR endpoint accepts document.file_id. :contentReference[oaicite:4]{index=4}
-    """
     if log_cb:
         log_cb("Upload PDF lên Mistral Files...")
 
-    # Upload file (SDK)
-    # docs: mistral.files.upload(file={"file_name": "...", "content": open(...,"rb")}) :contentReference[oaicite:5]{index=5}
     with open(pdf_path, "rb") as f:
         try:
             up = client.files.upload(
                 file={"file_name": os.path.basename(pdf_path), "content": f},
-                purpose="ocr",  # theo docs purpose có "ocr" :contentReference[oaicite:6]{index=6}
+                purpose="ocr",
             )
         except TypeError:
-            # nếu SDK version không nhận purpose trong upload, bỏ qua
             f.seek(0)
             up = client.files.upload(file={"file_name": os.path.basename(pdf_path), "content": f})
 
@@ -118,11 +132,10 @@ def mistral_ocr_pdf_to_text(client: Mistral, api_key: str, pdf_path: str, log_cb
     if log_cb:
         log_cb(f"✅ Upload xong. file_id={file_id}. Gọi OCR...")
 
-    # Call OCR REST (ổn định vì docs minh hoạ rõ file_id) :contentReference[oaicite:7]{index=7}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": OCR_MODEL,
-        "document": {"file_id": file_id},  # theo docs /v1/ocr với file_id :contentReference[oaicite:8]{index=8}
+        "document": {"file_id": file_id},
     }
     resp = requests.post("https://api.mistral.ai/v1/ocr", headers=headers, json=payload, timeout=300)
     resp.raise_for_status()
@@ -132,7 +145,6 @@ def mistral_ocr_pdf_to_text(client: Mistral, api_key: str, pdf_path: str, log_cb
     if not pages:
         raise RuntimeError("OCR không trả về pages.")
 
-    # OCR trả về markdown theo từng trang (docs có ví dụ pages[].markdown) :contentReference[oaicite:9]{index=9}
     md_parts = []
     for p in pages:
         md = p.get("markdown", "")
@@ -146,56 +158,74 @@ def mistral_ocr_pdf_to_text(client: Mistral, api_key: str, pdf_path: str, log_cb
 
 
 # =========================
-# 2) Chat extract bảng -> JSON
+# 2) Chat extract bảng -> JSON (UPDATED WITH PROMPT)
 # =========================
 def mistral_extract_table_json(
     client: Mistral,
     model: str,
     full_text: str,
-    table_title: str,
+    table_info: Dict, # Nhận cả dict info thay vì chỉ title
     log_cb=None,
 ) -> Dict:
+    
+    title = table_info["title"]
+    keywords = table_info["keywords"]
+
+    # --- PROMPT CHI TIẾT ĐƯỢC TÍCH HỢP VÀO ĐÂY ---
     system_msg = (
-        "Bạn là hệ thống trích xuất bảng tài chính từ văn bản OCR. "
-        "Chỉ trả về JSON hợp lệ, KHÔNG giải thích, KHÔNG thêm chữ ngoài JSON."
+        "Bạn là một chuyên gia Kế toán và Phân tích dữ liệu tài chính (Financial Data Analyst) "
+        "chuyên về chuẩn mực kế toán Việt Nam (VAS). "
+        "Nhiệm vụ của bạn là trích xuất dữ liệu Báo cáo tài chính từ văn bản OCR sang định dạng JSON chính xác."
     )
 
     user_msg = f"""
-Trích xuất bảng: "{table_title}" từ văn bản OCR dưới đây.
+    Hãy đọc văn bản OCR và trích xuất bảng: "{title}".
 
-BẮT BUỘC trả về 1 JSON object hợp lệ có cấu trúc:
-{{
-  "table_name": "<tên bảng>",
-  "columns": ["Mã số","Chỉ tiêu","Thuyết minh", "...các cột số liệu..."],
-  "rows": [
-    {{"Mã số":"...","Chỉ tiêu":"...","Thuyết minh":"...","...":"..."}},
-    ...
-  ]
-}}
+    **Hướng dẫn nhận diện (Key words):**
+    {keywords}
 
-Quy tắc:
-- columns đúng thứ tự cột trong bảng.
-- rows giữ ĐỦ mọi dòng; ô trống để "".
-- Giữ đầy đủ mã số, thuyết minh/ghi chú, và tất cả các cột số liệu (kỳ này/kỳ trước/...).
-- Dòng tiêu đề nhóm (không có mã số) vẫn đưa vào (Mã số="").
-- Không bịa dữ liệu. Không đoán.
+    **Quy tắc trích xuất (BẮT BUỘC):**
+    1. Chỉ trích xuất đúng bảng yêu cầu.
+    2. **Cấu trúc JSON đầu ra:**
+       {{
+          "table_name": "{title}",
+          "columns": ["Chỉ tiêu", "Mã số", "Thuyết minh", "Kỳ này", "Kỳ trước"],
+          "rows": [
+             {{
+                "Chỉ tiêu": "Tên dòng...", 
+                "Mã số": "01", 
+                "Thuyết minh": "V.01", 
+                "Kỳ này": "10.000.000", 
+                "Kỳ trước": "9.000.000"
+             }},
+             ...
+          ]
+       }}
+    3. **Xử lý số liệu:** - Giữ nguyên định dạng số (dấu chấm/phẩy).
+       - Số âm trong ngoặc đơn `( )` phải giữ nguyên (ví dụ: `(500)`).
+    4. **Cột 'Kỳ này' và 'Kỳ trước':** Thường là cột số liệu đầu tiên và thứ hai (hoặc Số cuối kỳ/Số đầu năm). Hãy tự suy luận dựa vào tiêu đề cột trong văn bản.
+    5. **Xử lý lỗi OCR:** Nếu dòng bị lệch, hãy ưu tiên cột "Mã số" (như 01, 10, 11, 20, 60...) để gióng hàng.
+    6. Nếu ô trống, hãy để chuỗi rỗng "".
+    7. Lấy ĐẦY ĐỦ các dòng từ đầu bảng đến cuối bảng (dựa vào Tổng cộng).
 
-Văn bản OCR:
-\"\"\"{full_text[:220_000]}\"\"\"
-""".strip()
+    **Văn bản OCR nguồn:**
+    \"\"\"{full_text[:250_000]}\"\"\"
+    """.strip()
 
     if log_cb:
-        log_cb(f"Gọi Mistral Chat để trích xuất: {table_title}")
+        log_cb(f"Đang phân tích và trích xuất: {title}...")
 
     res = client.chat.complete(
         model=model,
         messages=[{"role": "system", "content": system_msg},
                   {"role": "user", "content": user_msg}],
-        temperature=0.0,
+        temperature=0.0, # Nhiệt độ 0 để đảm bảo tính nhất quán
+        response_format={"type": "json_object"} # Bắt buộc JSON mode (nếu model hỗ trợ)
     )
     content = res.choices[0].message.content if res and res.choices else ""
     if not content:
         raise RuntimeError("Chat không trả về nội dung.")
+    
     return parse_model_json(content)
 
 
@@ -205,7 +235,7 @@ Văn bản OCR:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Mistral OCR PDF -> Trích xuất 3 bảng BCTC -> CSV")
+        self.title("Tool Trích xuất BCTC chuẩn VAS (Mistral AI)")
         self.geometry("980x640")
 
         self.pdf_path = tk.StringVar()
@@ -220,33 +250,32 @@ class App(tk.Tk):
         frm.pack(fill="both", expand=True)
 
         r1 = ttk.Frame(frm); r1.pack(fill="x", pady=6)
-        ttk.Label(r1, text="PDF:").pack(side="left")
+        ttk.Label(r1, text="File PDF BCTC:").pack(side="left")
         ttk.Entry(r1, textvariable=self.pdf_path).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(r1, text="Chọn PDF...", command=self.pick_pdf).pack(side="left")
 
         r2 = ttk.Frame(frm); r2.pack(fill="x", pady=6)
-        ttk.Label(r2, text="Thư mục lưu CSV:").pack(side="left")
+        ttk.Label(r2, text="Lưu CSV tại:").pack(side="left")
         ttk.Entry(r2, textvariable=self.out_dir).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(r2, text="Chọn thư mục...", command=self.pick_out_dir).pack(side="left")
 
         r3 = ttk.Frame(frm); r3.pack(fill="x", pady=6)
-        ttk.Label(r3, text="Chat model:").pack(side="left")
-        ttk.Entry(r3, textvariable=self.chat_model, width=22).pack(side="left", padx=8)
+        ttk.Label(r3, text="Model Chat:").pack(side="left")
+        ttk.Entry(r3, textvariable=self.chat_model, width=25).pack(side="left", padx=8)
+        ttk.Label(r3, text="(Nên dùng mistral-large-latest)").pack(side="left", padx=5)
 
         r4 = ttk.Frame(frm); r4.pack(fill="x", pady=6)
-        ttk.Label(r4, text="Mistral API key:").pack(side="left")
+        ttk.Label(r4, text="Mistral API Key:").pack(side="left")
         ent = ttk.Entry(r4, textvariable=self.api_key, show="*", width=60)
         ent.pack(side="left", padx=8, fill="x", expand=True)
-        ttk.Button(r4, text="Hiện/Ẩn",
-                   command=lambda: ent.config(show="" if ent.cget("show") else "*")).pack(side="left")
 
         rb = ttk.Frame(frm); rb.pack(fill="x", pady=10)
-        self.btn_run = ttk.Button(rb, text="Chạy trích xuất", command=self.run_async)
+        self.btn_run = ttk.Button(rb, text=">>> BẮT ĐẦU TRÍCH XUẤT <<<", command=self.run_async)
         self.btn_run.pack(side="left")
         ttk.Button(rb, text="Thoát", command=self.destroy).pack(side="right")
 
-        ttk.Label(frm, text="Log:").pack(anchor="w")
-        self.log = tk.Text(frm, height=22, wrap="word")
+        ttk.Label(frm, text="Nhật ký xử lý (Logs):").pack(anchor="w")
+        self.log = tk.Text(frm, height=20, wrap="word", bg="#f0f0f0")
         self.log.pack(fill="both", expand=True, pady=(6, 0))
         self.log.configure(state="disabled")
 
@@ -280,7 +309,8 @@ class App(tk.Tk):
             return
 
         self.btn_run.config(state="disabled")
-        self.log_write("=== Bắt đầu ===")
+        self.log.configure(bg="black", fg="#00ff00") # Hacker style log
+        self.log_write("=== Bắt đầu tiến trình trích xuất BCTC (VAS) ===")
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
@@ -302,33 +332,35 @@ class App(tk.Tk):
             # 2) Trích xuất 3 bảng -> CSV
             saved = []
             for key, meta in TABLES.items():
+                # Truyền toàn bộ meta (bao gồm title và keywords) vào hàm
                 table_json = mistral_extract_table_json(
                     client=client,
                     model=chat_model,
                     full_text=ocr_text,
-                    table_title=meta["title"],
+                    table_info=meta, 
                     log_cb=self.log_write
                 )
+                
                 df = json_to_dataframe(table_json)
-                out_path = os.path.join(out_dir, meta["filename"])
-                df.to_csv(out_path, index=False, encoding="utf-8-sig")
-                saved.append(out_path)
-                self.log_write(f"✅ Saved: {out_path} (rows={len(df)})")
+                
+                # Check nhanh dữ liệu
+                if df.empty:
+                    self.log_write(f"⚠️ Cảnh báo: Bảng {key} không có dữ liệu.")
+                else:
+                    out_path = os.path.join(out_dir, meta["filename"])
+                    df.to_csv(out_path, index=False, encoding="utf-8-sig")
+                    saved.append(out_path)
+                    self.log_write(f"✅ Đã lưu: {out_path} ({len(df)} dòng)")
 
-            self.log_write("=== HOÀN TẤT ===")
-            messagebox.showinfo("Xong", "Đã xuất 3 file CSV:\n\n" + "\n".join(saved))
+            self.log_write("=== HOÀN TẤT TOÀN BỘ ===")
+            messagebox.showinfo("Thành công", "Đã xuất xong các file CSV:\n\n" + "\n".join(saved))
 
-        except requests.HTTPError as e:
-            self.log_write(f"❌ HTTPError: {e}")
-            messagebox.showerror("HTTPError", str(e))
-        except models.SDKError as e:
-            self.log_write(f"❌ Mistral SDKError: {e}")
-            messagebox.showerror("Mistral SDKError", str(e))
         except Exception as e:
-            self.log_write(f"❌ Error: {e}")
+            self.log_write(f"❌ Lỗi nghiêm trọng: {e}")
             messagebox.showerror("Lỗi", str(e))
         finally:
             self.btn_run.config(state="normal")
+            self.log.configure(bg="#f0f0f0", fg="black")
 
 
 if __name__ == "__main__":
